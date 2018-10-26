@@ -14,7 +14,7 @@ module Audited
   module Auditor #:nodoc:
     extend ActiveSupport::Concern
 
-    CALLBACKS = [:audit_create, :audit_update, :audit_destroy]
+    CALLBACKS = %i[audit_create audit_update audit_destroy].freeze
 
     module ClassMethods
       # == Configuration options
@@ -78,8 +78,8 @@ module Audited
         # to notify a party after the audit has been created or if you want to access the newly-created
         # audit.
         define_callbacks :audit
-        set_callback :audit, :after, :after_audit, if: lambda { respond_to?(:after_audit, true) }
-        set_callback :audit, :around, :around_audit, if: lambda { respond_to?(:around_audit, true) }
+        set_callback :audit, :after, :after_audit, if: -> { respond_to?(:after_audit, true) }
+        set_callback :audit, :around, :around_audit, if: -> { respond_to?(:around_audit, true) }
 
         enable_auditing
       end
@@ -115,7 +115,7 @@ module Audited
       def revisions(from_version = 1)
         return [] unless audits.from_version(from_version).exists?
 
-        all_audits = audits.select([:audited_changes, :version]).to_a
+        all_audits = audits.select(%i[audited_changes version]).to_a
         targeted_audits = all_audits.select { |audit| audit.version >= from_version }
 
         previous_attributes = reconstruct_attributes(all_audits - targeted_audits)
@@ -129,7 +129,7 @@ module Audited
       # Get a specific revision specified by the version number, or +:previous+
       # Returns nil for versions greater than revisions count
       def revision(version)
-        if version == :previous || self.audits.last.version >= version
+        if version == :previous || audits.last.version >= version
           revision_with Audited.audit_class.reconstruct_attributes(audits_to(version))
         end
       end
@@ -153,7 +153,7 @@ module Audited
 
         transaction do
           combine_target.save!
-          audits_to_combine.unscope(:limit).where("version < ?", combine_target.version).delete_all
+          audits_to_combine.unscope(:limit).where('version < ?', combine_target.version).delete_all
         end
       end
 
@@ -221,20 +221,31 @@ module Audited
       end
 
       def audit_create
+        audit_comment = "创建#{I18n.t('Tables')[self.class.to_s.to_sym]}" rescue nil if audit_comment.blank?
         write_audit(action: 'create', audited_changes: audited_attributes,
                     comment: audit_comment)
       end
 
       def audit_update
         unless (changes = audited_changes).empty? && audit_comment.blank?
+          audit_comment = "更新#{I18n.t('Tables')[self.class.to_s.to_sym]}信息" rescue nil if audit_comment.blank?
           write_audit(action: 'update', audited_changes: changes,
                       comment: audit_comment)
         end
       end
 
       def audit_destroy
-        write_audit(action: 'destroy', audited_changes: audited_attributes,
-                    comment: audit_comment) unless new_record?
+        unless new_record?
+          if audit_comment.blank?
+            audit_comment = begin
+                             "删除#{I18n.t('Tables')[self.class.to_s.to_sym]}"
+                           rescue
+                             nil
+                           end
+          end
+          write_audit(action: 'destroy', audited_changes: audited_attributes,
+                      comment: audit_comment)
+       end
       end
 
       def write_audit(attrs)
@@ -242,11 +253,11 @@ module Audited
         self.audit_comment = nil
 
         if auditing_enabled
-          run_callbacks(:audit) {
+          run_callbacks(:audit) do
             audit = audits.create(attrs)
             combine_audits_if_needed if attrs[:action] != 'create'
             audit
-          }
+          end
         end
       end
 
@@ -258,8 +269,8 @@ module Audited
 
       def comment_required_state?
         auditing_enabled &&
-          ((audited_options[:on].include?(:create) && self.new_record?) ||
-          (audited_options[:on].include?(:update) && self.persisted? && self.changed?))
+          ((audited_options[:on].include?(:create) && new_record?) ||
+          (audited_options[:on].include?(:update) && persisted? && changed?))
       end
 
       def combine_audits_if_needed
@@ -283,7 +294,7 @@ module Audited
       end
 
       def auditing_enabled
-        return run_conditional_check(audited_options[:if]) &&
+        run_conditional_check(audited_options[:if]) &&
           run_conditional_check(audited_options[:unless], matching: false) &&
           self.class.auditing_enabled
       end
@@ -370,7 +381,7 @@ module Audited
 
       def normalize_audited_options
         audited_options[:on] = Array.wrap(audited_options[:on])
-        audited_options[:on] = [:create, :update, :destroy] if audited_options[:on].empty?
+        audited_options[:on] = %i[create update destroy] if audited_options[:on].empty?
         audited_options[:only] = Array.wrap(audited_options[:only]).map(&:to_s)
         audited_options[:except] = Array.wrap(audited_options[:except]).map(&:to_s)
         max_audits = audited_options[:max_audits] || Audited.max_audits
